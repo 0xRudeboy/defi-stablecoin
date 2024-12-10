@@ -31,7 +31,8 @@ contract DSCEngine is ReentrancyGuard {
     error DSCEngine__TokenAddressesAndPriceFeedAddressesMustBeSameLength();
     error DSCEngine__TokenNotAllowed();
     error DSCEngine__TransferFailed();
-
+    error DSCEngine__BreaksHealthFactor(uint256 healthFactor);
+    error DSCEngine__MintFailed();
     // ================================================================
     // │                   CONSTANTS AND IMMUTABLES                   │
     // ================================================================
@@ -43,7 +44,9 @@ contract DSCEngine is ReentrancyGuard {
     // ================================================================
     uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
     uint256 private constant PRECISION = 1e18;
-
+    uint256 private constant LIQUIDATION_THRESHOLD = 50; // 200% overcollateralized
+    uint256 private constant LIQUIDATION_PRECISION = 100;
+    uint256 private constant MIN_HEALTH_FACTOR = 1;
     mapping(address token => address priceFeed) private s_priceFeeds;
     mapping(address user => mapping(address token => uint256 amount)) private s_collateralDeposited;
     mapping(address user => uint256 amountDSCMinted) private s_DSCMinted;
@@ -125,6 +128,12 @@ contract DSCEngine is ReentrancyGuard {
         s_DSCMinted[msg.sender] += amountDSCToMint;
 
         _revertIfHealthFactorIsBroken(msg.sender);
+
+        bool minted = i_dsc.mint(msg.sender, amountDSCToMint);
+
+        if (!minted) {
+            revert DSCEngine__MintFailed();
+        }
     }
 
     function burnDSC() external {}
@@ -154,11 +163,26 @@ contract DSCEngine is ReentrancyGuard {
         // 1. Get the total collateral value (in USD)
         // 2. Get the total DSC minted (in USD)
         (uint256 totalDscMinted, uint256 collateralValueInUsd) = _getAccountInformation(user);
+
+        uint256 collateralAdjustedForThreshold = (collateralValueInUsd * LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECISION;
+
+        // $ 1,000 ETH * 50 = $50,000 / 100 = $500
+
+        // $150 ETH / $100 DSC = 1.5
+        // 150 * 50 = 7,500 / 100 = 75 -> 75 / 100 < 1 = liquidation/unhealthy
+
+        // $1000 ETH / 100 DSC
+        //  1000 * 50 = 50000 / 100 = (500 / 100) > 1 = healthy
+        return (collateralAdjustedForThreshold * PRECISION) / totalDscMinted;
     }
 
+    // 1. Check health factor (do they have enough collateral to cover their DSC?)
+    // 2. If not, revert
     function _revertIfHealthFactorIsBroken(address user) internal view {
-        // 1. Check health factor (do they have enough collateral to cover their DSC?)
-        // 2. If not, revert
+        uint256 userHealthFactor = _healthFactor(user);
+        if (userHealthFactor < MIN_HEALTH_FACTOR) {
+            revert DSCEngine__BreaksHealthFactor(userHealthFactor);
+        }
     }
 
     // ================================================================
